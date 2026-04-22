@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  license-check:
+    name: license check (no AGPL / GPL / SSPL)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: verify LICENSE is Apache-2.0
+        run: grep -q "Apache License" LICENSE
+      - name: scan repo for banned license strings
+        run: |
+          # Phase 1 will add pip-licenses + license-checker against lockfiles.
+          # For now, fail if any bundled LICENSE-style file declares GPL/AGPL/SSPL.
+          set -e
+          if grep -rIE "GNU (Affero )?General Public License|Server Side Public License" \
+               --include='LICENSE*' --include='COPYING*' . \
+               | grep -v '^./\.git'; then
+            echo "::error::Found banned license in repo"
+            exit 1
+          fi
+          echo "OK"

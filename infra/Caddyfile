@@ -1,0 +1,31 @@
+# universal-bot — auto-HTTPS reverse proxy
+#
+# Replace YOUR_DOMAIN below with your DuckDNS subdomain
+# (e.g. yourname-universal-bot.duckdns.org).
+#
+# Caddy automatically obtains and renews a Let's Encrypt certificate
+# the first time this domain is hit over HTTPS. No manual cert work.
+
+YOUR_DOMAIN {
+    encode zstd gzip
+
+    # Phase 5: Jaeger traces UI (optional — remove the handle block if not running).
+    handle /traces/* {
+        reverse_proxy localhost:16686
+    }
+
+    # Backend API (FastAPI) — Phase 1
+    handle /api/* {
+        reverse_proxy localhost:8000
+    }
+
+    # Frontend (Next.js) — Phase 1, catch-all
+    handle {
+        reverse_proxy localhost:3000
+    }
+
+    log {
+        output file /var/log/caddy/access.log
+        format console
+    }
+}
