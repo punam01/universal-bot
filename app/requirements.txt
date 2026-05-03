@@ -1,0 +1,7 @@
+streamlit>=1.40
+chromadb>=0.5
+fastembed>=0.4
+pypdfium2>=4.30
+google-genai>=0.7
+groq>=0.11
+python-dotenv>=1.0

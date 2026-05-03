@@ -1,0 +1,37 @@
+# Phase 1 — minimal stack: vector DB + RAG app.
+# Run with:  docker compose up --build
+# Stop with: docker compose down  (add -v to wipe data)
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.10.1
+    container_name: ub-qdrant
+    ports:
+      - "6333:6333"      # HTTP API / dashboard
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+
+  app:
+    build: ./app
+    container_name: ub-app
+    ports:
+      - "8501:8501"      # Streamlit UI
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-documents}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:?GOOGLE_API_KEY required — copy .env.example to .env and set it}
+      LLM_MODEL: ${LLM_MODEL:-gemini-2.0-flash}
+      EMBED_MODEL: ${EMBED_MODEL:-BAAI/bge-small-en-v1.5}
+      CHUNK_SIZE: ${CHUNK_SIZE:-1500}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-200}
+    depends_on:
+      - qdrant
+    volumes:
+      - ./app:/app                   # bind mount for hot-reload during dev
+      - fastembed-cache:/root/.cache # persist embedding model across rebuilds
+    restart: unless-stopped
+
+volumes:
+  qdrant-data:
+  fastembed-cache:
