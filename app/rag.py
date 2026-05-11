@@ -49,6 +49,10 @@ class RAGEngine:
     def available_indexers(self) -> list[tuple[str, str]]:
         return [(key, indexers.get(key).name) for key in indexers.keys()]
 
+    def connector_kind(self, key: str) -> str:
+        """Return the input_kind ('file' | 'url' | 'text') of the named connector."""
+        return connectors.get(key).input_kind
+
     # ---------- memoized plugin getters ----------
 
     def _provider(self, key: str) -> LLMProvider:

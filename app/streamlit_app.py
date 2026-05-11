@@ -85,8 +85,11 @@ with st.sidebar:
         format_func=lambda k: dict(connector_options)[k],
     )
 
-    if connector_key == "pdf":
-        pdf = st.file_uploader("Upload PDF", type=["pdf"])
+    connector_kind = engine.connector_kind(connector_key)
+    connector_name = dict(connector_options)[connector_key]
+
+    if connector_kind == "file":
+        pdf = st.file_uploader(f"Upload file ({connector_name})", type=["pdf"])
         if pdf is not None and st.button(
             f"Index {pdf.name}", use_container_width=True
         ):
@@ -99,23 +102,27 @@ with st.sidebar:
                     st.error(f"Ingest failed: {exc}")
                 else:
                     st.success(f"Indexed {n} chunks into '{indexer_key}'")
-    elif connector_key == "url":
-        url = st.text_input("Page URL", placeholder="https://...")
-        if url and st.button("Fetch & index", use_container_width=True):
-            with st.spinner("Fetching & indexing..."):
+    elif connector_kind == "url":
+        url = st.text_input("URL", placeholder="https://...")
+        if url and st.button(
+            f"Run {connector_name}", use_container_width=True
+        ):
+            with st.spinner(
+                f"{connector_name} running... (crawls may take a few minutes)"
+            ):
                 try:
                     n = engine.ingest(connector_key, indexer_key, url, url)
                 except Exception as exc:
                     st.error(f"Ingest failed: {exc}")
                 else:
                     if n == 0:
-                        st.warning("No text extracted from that URL.")
+                        st.warning("No content extracted.")
                     else:
                         st.success(f"Indexed {n} chunks into '{indexer_key}'")
     else:
         st.info(
-            f"No upload UI for connector '{connector_key}' yet — drop a "
-            f"matching file under app/connectors/ to register one."
+            f"No UI yet for input_kind={connector_kind!r}. Drop a matching "
+            f"file under app/connectors/ to extend."
         )
 
     st.divider()
