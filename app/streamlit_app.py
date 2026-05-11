@@ -1,29 +1,39 @@
-"""Phase 1 UI — minimal Streamlit chat with PDF upload."""
+"""Phase 2 UI — plugin pickers in the sidebar.
+
+Selectboxes are populated from the engine's registries, so adding a new
+plugin file under app/{connectors,indexers,providers}/ automatically
+makes it appear here on the next restart.
+"""
 from __future__ import annotations
 
 import streamlit as st
 
+from config import settings
 from rag import RAGEngine
 
 
-st.set_page_config(page_title="universal-bot — Phase 1", layout="wide")
+st.set_page_config(page_title="universal-bot — Phase 2", layout="wide")
 st.title("universal-bot")
-st.caption(
-    "Phase 1 — upload a PDF, ask questions. "
-    "Free Gemini 2.0 Flash + local CPU embeddings (bge-small)."
+st.caption("Phase 2 — pluggable connectors, indexers, and LLM providers.")
+
+
+@st.cache_resource(
+    show_spinner="Starting engine (downloads embedding model on first run)..."
 )
-
-
-@st.cache_resource(show_spinner="Starting engine (downloads embedding model on first run)...")
 def get_engine() -> RAGEngine:
     return RAGEngine()
+
+
+engine = get_engine()
 
 
 def _render_sources(sources: list[dict]) -> None:
     with st.expander(f"Sources ({len(sources)})"):
         for i, s in enumerate(sources, 1):
+            page = s.get("page")
+            page_label = f" — page {page}" if page else ""
             st.caption(
-                f"**[{i}] {s['source']}** — page {s.get('page', '?')} "
+                f"**[{i}] {s['source']}**{page_label} "
                 f"(score {s['score']:.3f})"
             )
             preview = s["text"]
@@ -32,56 +42,119 @@ def _render_sources(sources: list[dict]) -> None:
             st.text(preview)
 
 
-engine = get_engine()
+def _default_index(options: list[tuple[str, str]], desired: str) -> int:
+    keys = [k for k, _ in options]
+    return keys.index(desired) if desired in keys else 0
 
 
-# ---------- Sidebar: knowledge management ----------
+# ---------- Sidebar: configuration + ingest ----------
 with st.sidebar:
-    st.header("Knowledge")
-    pdf = st.file_uploader("Upload a PDF", type=["pdf"], accept_multiple_files=False)
-    if pdf is not None:
-        if st.button(f"Index {pdf.name}", use_container_width=True):
-            with st.spinner("Extracting → chunking → embedding..."):
-                n = engine.ingest_pdf(pdf.getvalue(), pdf.name)
-            if n:
-                st.success(f"Indexed {n} chunks from {pdf.name}")
-            else:
-                st.warning(
-                    "No text extracted. Is this a scanned/image-only PDF? "
-                    "OCR support arrives in a later phase."
-                )
+    st.header("Configuration")
+
+    provider_options = engine.available_providers()
+    if not provider_options:
+        st.error(
+            "No LLM provider keys found in .env. Set at least one of "
+            "GROQ_API_KEY or GOOGLE_API_KEY."
+        )
+        st.stop()
+    provider_key = st.selectbox(
+        "LLM provider",
+        options=[k for k, _ in provider_options],
+        index=_default_index(provider_options, settings.default_provider),
+        format_func=lambda k: dict(provider_options)[k],
+    )
+
+    indexer_options = engine.available_indexers()
+    indexer_key = st.selectbox(
+        "Indexer (retrieval strategy)",
+        options=[k for k, _ in indexer_options],
+        index=_default_index(indexer_options, settings.default_indexer),
+        format_func=lambda k: dict(indexer_options)[k],
+        help="`semantic` = vector similarity; `syntactic` = BM25 keyword search.",
+    )
 
     st.divider()
-    if st.button("Reset index", use_container_width=True, type="secondary"):
-        engine.reset()
+    st.subheader("Add knowledge")
+
+    connector_options = engine.available_connectors()
+    connector_key = st.selectbox(
+        "Source type",
+        options=[k for k, _ in connector_options],
+        index=_default_index(connector_options, settings.default_connector),
+        format_func=lambda k: dict(connector_options)[k],
+    )
+
+    if connector_key == "pdf":
+        pdf = st.file_uploader("Upload PDF", type=["pdf"])
+        if pdf is not None and st.button(
+            f"Index {pdf.name}", use_container_width=True
+        ):
+            with st.spinner("Ingesting..."):
+                try:
+                    n = engine.ingest(
+                        connector_key, indexer_key, pdf.getvalue(), pdf.name
+                    )
+                except Exception as exc:
+                    st.error(f"Ingest failed: {exc}")
+                else:
+                    st.success(f"Indexed {n} chunks into '{indexer_key}'")
+    elif connector_key == "url":
+        url = st.text_input("Page URL", placeholder="https://...")
+        if url and st.button("Fetch & index", use_container_width=True):
+            with st.spinner("Fetching & indexing..."):
+                try:
+                    n = engine.ingest(connector_key, indexer_key, url, url)
+                except Exception as exc:
+                    st.error(f"Ingest failed: {exc}")
+                else:
+                    if n == 0:
+                        st.warning("No text extracted from that URL.")
+                    else:
+                        st.success(f"Indexed {n} chunks into '{indexer_key}'")
+    else:
+        st.info(
+            f"No upload UI for connector '{connector_key}' yet — drop a "
+            f"matching file under app/connectors/ to register one."
+        )
+
+    st.divider()
+    if st.button("Reset all indexes", use_container_width=True):
+        engine.reset_all()
         st.session_state.pop("messages", None)
-        st.success("Index cleared")
+        st.success("All indexes cleared")
 
 
 # ---------- Main: chat ----------
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Replay history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if msg.get("sources"):
             _render_sources(msg["sources"])
 
-# New turn
-if prompt := st.chat_input("Ask a question about your PDFs..."):
+if prompt := st.chat_input("Ask a question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        sources = engine.retrieve(prompt)
+        try:
+            sources = engine.retrieve(indexer_key, prompt)
+        except Exception as exc:
+            st.error(f"Retrieval failed: {exc}")
+            sources = []
+
         placeholder = st.empty()
         full = ""
-        for token in engine.chat_stream(prompt, sources):
-            full += token
-            placeholder.markdown(full + "▌")
+        try:
+            for token in engine.chat_stream(provider_key, prompt, sources):
+                full += token
+                placeholder.markdown(full + "▌")
+        except Exception as exc:
+            full = f"_LLM error: {exc}_"
         placeholder.markdown(full)
         if sources:
             _render_sources(sources)
