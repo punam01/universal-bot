@@ -1,9 +1,4 @@
-"""Phase 2 RAG orchestrator — wires connector + indexer + provider plugins.
-
-This file no longer knows anything about Groq, Gemini, PDFs, ChromaDB, or
-BM25 — those live inside their respective plugin packages. It only knows
-the registries and the high-level pipeline (ingest / retrieve / chat).
-"""
+"""Phase 2.5 RAG orchestrator — connectors + indexers + rerankers + providers."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -18,6 +13,17 @@ from connectors import connectors, Connector
 from indexers import indexers, Indexer, IndexerContext
 from providers import providers
 from providers.base import LLMProvider
+from rerankers import rerankers
+from rerankers.base import Reranker
+
+
+_SYSTEM_PROMPT = (
+    "You are a helpful assistant answering questions from indexed documents. "
+    "Answer strictly from the context provided with each user question. "
+    "Cite sources inline as [1], [2], etc. If the answer is not in the "
+    "context, say so honestly. Prior chat turns are for conversational "
+    "continuity only — they do not contain authoritative facts."
+)
 
 
 class RAGEngine:
@@ -37,6 +43,7 @@ class RAGEngine:
         self._provider_cache: dict[str, LLMProvider] = {}
         self._indexer_cache: dict[str, Indexer] = {}
         self._connector_cache: dict[str, Connector] = {}
+        self._reranker_cache: dict[str, Reranker] = {}
 
     # ---------- registry surfaces (consumed by the UI) ----------
 
@@ -49,8 +56,10 @@ class RAGEngine:
     def available_indexers(self) -> list[tuple[str, str]]:
         return [(key, indexers.get(key).name) for key in indexers.keys()]
 
+    def available_rerankers(self) -> list[tuple[str, str]]:
+        return [(key, rerankers.get(key).name) for key in rerankers.keys()]
+
     def connector_kind(self, key: str) -> str:
-        """Return the input_kind ('file' | 'url' | 'text') of the named connector."""
         return connectors.get(key).input_kind
 
     # ---------- memoized plugin getters ----------
@@ -70,6 +79,11 @@ class RAGEngine:
             self._connector_cache[key] = connectors.get(key)()
         return self._connector_cache[key]
 
+    def _reranker(self, key: str) -> Reranker:
+        if key not in self._reranker_cache:
+            self._reranker_cache[key] = rerankers.get(key)()
+        return self._reranker_cache[key]
+
     # ---------- pipeline ----------
 
     def ingest(
@@ -85,15 +99,27 @@ class RAGEngine:
         )
 
     def retrieve(
-        self, indexer_key: str, query: str, top_k: int = 5
+        self,
+        indexer_key: str,
+        query: str,
+        top_k: int = 5,
+        reranker_key: str = "none",
     ) -> list[dict]:
-        return self._indexer(indexer_key).retrieve(query, top_k)
+        if reranker_key == "none":
+            return self._indexer(indexer_key).retrieve(query, top_k)
+        # Retrieve a wider pool, then rerank down to top_k.
+        initial = self._indexer(indexer_key).retrieve(query, top_k * 4)
+        if not initial:
+            return []
+        return self._reranker(reranker_key).rerank(query, initial, top_k)
 
     def chat_stream(
         self,
         provider_key: str,
         query: str,
         sources: list[dict],
+        history: list[dict] | None = None,
+        max_history_msgs: int = 6,
     ) -> Iterator[str]:
         if not sources:
             yield (
@@ -102,19 +128,27 @@ class RAGEngine:
             )
             return
 
+        history = history or []
+        # Keep only well-formed user/assistant turns, capped.
+        recent = [
+            h for h in history[-max_history_msgs:]
+            if h.get("role") in ("user", "assistant") and h.get("content")
+        ]
+
         context = "\n\n".join(
             f"[{i}] (from {s['source']}, page {s.get('page', '?')})\n{s['text']}"
             for i, s in enumerate(sources, 1)
         )
-        prompt = (
-            "Answer the question strictly from the context below. "
-            "Cite sources inline as [1], [2], etc. "
-            "If the answer is not in the context, say so honestly.\n\n"
-            f"Context:\n{context}\n\n"
-            f"Question: {query}\n\n"
-            "Answer:"
-        )
-        yield from self._provider(provider_key).stream(prompt)
+
+        messages: list[dict] = [{"role": "system", "content": _SYSTEM_PROMPT}]
+        for h in recent:
+            messages.append({"role": h["role"], "content": h["content"]})
+        messages.append({
+            "role": "user",
+            "content": f"Context for this question:\n{context}\n\nQuestion: {query}",
+        })
+
+        yield from self._provider(provider_key).stream(messages)
 
     def reset_all(self) -> None:
         for key in indexers.keys():

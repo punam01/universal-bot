@@ -2,8 +2,13 @@
 
 Each provider:
 - declares its env vars (api key and optional model override)
-- implements stream(prompt) -> Iterator[str]
+- implements stream(messages) -> Iterator[str]
 - gets is_available() and from_env() for free
+
+`messages` is a list of {role, content} dicts, where role is one of
+'system', 'user', or 'assistant'. Providers that don't natively support
+a 'system' role should fold its content into the first user message or
+into a provider-specific system_instruction field.
 """
 from __future__ import annotations
 
@@ -39,5 +44,5 @@ class LLMProvider(ABC):
         return cls(api_key=api_key, model=model)
 
     @abstractmethod
-    def stream(self, prompt: str) -> Iterator[str]:
-        """Yield completion tokens one chunk at a time."""
+    def stream(self, messages: list[dict]) -> Iterator[str]:
+        """Yield completion tokens given a chat-style messages list."""

@@ -1,9 +1,4 @@
-"""Phase 2 UI — plugin pickers in the sidebar.
-
-Selectboxes are populated from the engine's registries, so adding a new
-plugin file under app/{connectors,indexers,providers}/ automatically
-makes it appear here on the next restart.
-"""
+"""Phase 2.5 UI — adds reranker dropdown + multi-turn chat memory."""
 from __future__ import annotations
 
 import streamlit as st
@@ -12,9 +7,12 @@ from config import settings
 from rag import RAGEngine
 
 
-st.set_page_config(page_title="universal-bot — Phase 2", layout="wide")
+st.set_page_config(page_title="universal-bot", layout="wide")
 st.title("universal-bot")
-st.caption("Phase 2 — pluggable connectors, indexers, and LLM providers.")
+st.caption(
+    "Pluggable connectors, indexers, rerankers, and LLM providers. "
+    "Multi-turn chat with cited sources."
+)
 
 
 @st.cache_resource(
@@ -71,7 +69,23 @@ with st.sidebar:
         options=[k for k, _ in indexer_options],
         index=_default_index(indexer_options, settings.default_indexer),
         format_func=lambda k: dict(indexer_options)[k],
-        help="`semantic` = vector similarity; `syntactic` = BM25 keyword search.",
+        help=(
+            "`semantic` = vector similarity, `syntactic` = BM25 keyword, "
+            "`hybrid` = both fused via RRF."
+        ),
+    )
+
+    reranker_options = engine.available_rerankers()
+    reranker_choices = [("none", "None")] + reranker_options
+    reranker_key = st.selectbox(
+        "Reranker (optional)",
+        options=[k for k, _ in reranker_choices],
+        index=_default_index(reranker_choices, settings.default_reranker),
+        format_func=lambda k: dict(reranker_choices)[k],
+        help=(
+            "Reorders the top retrieval results with a small CPU model. "
+            "Big quality lift for negligible cost. First use downloads ~4 MB."
+        ),
     )
 
     st.divider()
@@ -131,6 +145,10 @@ with st.sidebar:
         st.session_state.pop("messages", None)
         st.success("All indexes cleared")
 
+    if st.button("Clear chat", use_container_width=True):
+        st.session_state.pop("messages", None)
+        st.success("Chat cleared")
+
 
 # ---------- Main: chat ----------
 if "messages" not in st.session_state:
@@ -149,15 +167,23 @@ if prompt := st.chat_input("Ask a question..."):
 
     with st.chat_message("assistant"):
         try:
-            sources = engine.retrieve(indexer_key, prompt)
+            sources = engine.retrieve(
+                indexer_key, prompt, reranker_key=reranker_key
+            )
         except Exception as exc:
             st.error(f"Retrieval failed: {exc}")
             sources = []
 
+        # History excludes the user message we just appended; chat_stream
+        # appends it back as the final user turn alongside the context.
+        history = st.session_state.messages[:-1]
+
         placeholder = st.empty()
         full = ""
         try:
-            for token in engine.chat_stream(provider_key, prompt, sources):
+            for token in engine.chat_stream(
+                provider_key, prompt, sources, history=history
+            ):
                 full += token
                 placeholder.markdown(full + "▌")
         except Exception as exc:

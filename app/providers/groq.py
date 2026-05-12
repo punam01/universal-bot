@@ -20,10 +20,11 @@ class GroqProvider(LLMProvider):
         super().__init__(api_key, model)
         self._client = Groq(api_key=self.api_key)
 
-    def stream(self, prompt: str) -> Iterator[str]:
+    def stream(self, messages: list[dict]) -> Iterator[str]:
+        # Groq's chat API is OpenAI-compatible — pass messages through directly.
         completion = self._client.chat.completions.create(
             model=self.model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             stream=True,
         )
         for chunk in completion:

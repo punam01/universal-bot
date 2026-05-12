@@ -1,8 +1,7 @@
-"""Phase 2 runtime config — global defaults only.
+"""Phase 2.5 runtime config — global defaults only.
 
 Provider API keys live with each provider plugin (Groq reads GROQ_API_KEY,
-Gemini reads GOOGLE_API_KEY, etc.). The UI picks providers dynamically
-based on which keys are present.
+Gemini reads GOOGLE_API_KEY, etc.). The UI picks plugins dynamically.
 """
 from __future__ import annotations
 
@@ -28,6 +27,7 @@ class Settings:
     default_provider: str
     default_indexer: str
     default_connector: str
+    default_reranker: str
 
 
 def load() -> Settings:
@@ -40,6 +40,7 @@ def load() -> Settings:
         default_provider=os.getenv("LLM_PROVIDER", "groq"),
         default_indexer=os.getenv("DEFAULT_INDEXER", "semantic"),
         default_connector=os.getenv("DEFAULT_CONNECTOR", "pdf"),
+        default_reranker=os.getenv("DEFAULT_RERANKER", "none"),
     )
 
 

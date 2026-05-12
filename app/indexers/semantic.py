@@ -72,5 +72,9 @@ class SemanticIndexer(Indexer):
         ]
 
     def reset(self) -> None:
-        self.ctx.chroma_client.delete_collection(name=self._collection_name)
+        # Idempotent: deleting a non-existent collection should not raise.
+        try:
+            self.ctx.chroma_client.delete_collection(name=self._collection_name)
+        except Exception:
+            pass
         self._collection = self._get_or_create()
