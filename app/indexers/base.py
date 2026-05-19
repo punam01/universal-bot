@@ -24,9 +24,16 @@ class IndexerContext:
 class Indexer(ABC):
     name: ClassVar[str]
     description: ClassVar[str] = ""
+    is_composite: ClassVar[bool] = False     # True if it wraps other indexers
+    deps: ClassVar[list[str]] = []            # keys of other indexers it depends on
 
-    def __init__(self, ctx: IndexerContext) -> None:
+    def __init__(
+        self,
+        ctx: IndexerContext,
+        deps: dict[str, "Indexer"] | None = None,
+    ) -> None:
         self.ctx = ctx
+        self._deps = deps or {}
 
     @abstractmethod
     def index(
@@ -44,3 +51,11 @@ class Indexer(ABC):
     @abstractmethod
     def reset(self) -> None:
         """Remove all stored data for this indexer."""
+
+    @abstractmethod
+    def list_sources(self) -> list[dict]:
+        """Return [{source: str, chunks: int}] for everything currently indexed."""
+
+    @abstractmethod
+    def delete_source(self, source: str) -> int:
+        """Delete every chunk whose source matches. Returns count removed."""

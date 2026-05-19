@@ -27,8 +27,8 @@ class SyntacticIndexer(Indexer):
     name = "Syntactic (BM25 keyword)"
     description = "Best for exact identifiers, codes, names, terminology."
 
-    def __init__(self, ctx: IndexerContext) -> None:
-        super().__init__(ctx)
+    def __init__(self, ctx: IndexerContext, deps=None) -> None:
+        super().__init__(ctx, deps)
         self._path: Path = Path(ctx.storage_dir) / "bm25.pkl"
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._corpus: list[str] = []
@@ -50,6 +50,9 @@ class SyntacticIndexer(Indexer):
         with self._path.open("wb") as f:
             pickle.dump({"corpus": self._corpus, "metas": self._metas}, f)
 
+    def _rebuild_bm25(self) -> None:
+        self._bm25 = BM25Okapi([_tokenize(c) for c in self._corpus]) if self._corpus else None
+
     def index(self, docs: Iterable[Document], chunk_size: int, overlap: int) -> int:
         added = 0
         for doc in docs:
@@ -58,7 +61,7 @@ class SyntacticIndexer(Indexer):
                 self._metas.append({"source": doc.source, "page": doc.page})
                 added += 1
         if added:
-            self._bm25 = BM25Okapi([_tokenize(c) for c in self._corpus])
+            self._rebuild_bm25()
             self._save()
         return added
 
@@ -87,3 +90,27 @@ class SyntacticIndexer(Indexer):
         self._bm25 = None
         if self._path.exists():
             self._path.unlink()
+
+    def list_sources(self) -> list[dict]:
+        counts: dict[str, int] = {}
+        for meta in self._metas:
+            src = meta.get("source", "?")
+            counts[src] = counts.get(src, 0) + 1
+        return [{"source": s, "chunks": c} for s, c in sorted(counts.items())]
+
+    def delete_source(self, source: str) -> int:
+        keep_chunks: list[str] = []
+        keep_metas: list[dict] = []
+        removed = 0
+        for chunk, meta in zip(self._corpus, self._metas):
+            if meta.get("source") == source:
+                removed += 1
+            else:
+                keep_chunks.append(chunk)
+                keep_metas.append(meta)
+        if removed:
+            self._corpus = keep_chunks
+            self._metas = keep_metas
+            self._rebuild_bm25()
+            self._save()
+        return removed

@@ -1,4 +1,4 @@
-"""Phase 2.5 RAG orchestrator — connectors + indexers + rerankers + providers."""
+"""RAG orchestrator — connectors + indexers + rerankers + providers."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -71,7 +71,13 @@ class RAGEngine:
 
     def _indexer(self, key: str) -> Indexer:
         if key not in self._indexer_cache:
-            self._indexer_cache[key] = indexers.get(key)(self._indexer_ctx)
+            cls = indexers.get(key)
+            dep_keys = getattr(cls, "deps", []) or []
+            if dep_keys:
+                resolved = {dep: self._indexer(dep) for dep in dep_keys}
+                self._indexer_cache[key] = cls(self._indexer_ctx, deps=resolved)
+            else:
+                self._indexer_cache[key] = cls(self._indexer_ctx)
         return self._indexer_cache[key]
 
     def _connector(self, key: str) -> Connector:
@@ -107,7 +113,6 @@ class RAGEngine:
     ) -> list[dict]:
         if reranker_key == "none":
             return self._indexer(indexer_key).retrieve(query, top_k)
-        # Retrieve a wider pool, then rerank down to top_k.
         initial = self._indexer(indexer_key).retrieve(query, top_k * 4)
         if not initial:
             return []
@@ -129,7 +134,6 @@ class RAGEngine:
             return
 
         history = history or []
-        # Keep only well-formed user/assistant turns, capped.
         recent = [
             h for h in history[-max_history_msgs:]
             if h.get("role") in ("user", "assistant") and h.get("content")
@@ -149,6 +153,41 @@ class RAGEngine:
         })
 
         yield from self._provider(provider_key).stream(messages)
+
+    # ---------- source management ----------
+
+    def list_all_sources(self) -> list[dict]:
+        """Aggregate sources across all non-composite indexers.
+
+        Returns: [{source, indexers: list[str], chunks: dict[indexer_key, int],
+                   total: int}], sorted by source name.
+        """
+        merged: dict[str, dict] = {}
+        for key in indexers.keys():
+            cls = indexers.get(key)
+            if getattr(cls, "is_composite", False):
+                continue
+            idx = self._indexer(key)
+            for entry in idx.list_sources():
+                src = entry["source"]
+                bucket = merged.setdefault(
+                    src, {"source": src, "indexers": [], "chunks": {}, "total": 0}
+                )
+                if key not in bucket["indexers"]:
+                    bucket["indexers"].append(key)
+                bucket["chunks"][key] = entry["chunks"]
+                bucket["total"] += entry["chunks"]
+        return sorted(merged.values(), key=lambda x: x["source"].lower())
+
+    def delete_source(self, source: str) -> int:
+        """Delete a source from every non-composite indexer that holds it."""
+        total = 0
+        for key in indexers.keys():
+            cls = indexers.get(key)
+            if getattr(cls, "is_composite", False):
+                continue
+            total += self._indexer(key).delete_source(source)
+        return total
 
     def reset_all(self) -> None:
         for key in indexers.keys():

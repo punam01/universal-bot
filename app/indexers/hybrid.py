@@ -1,7 +1,13 @@
-"""Hybrid indexer — composes semantic + syntactic via Reciprocal Rank Fusion."""
+"""Hybrid indexer — composes semantic + syntactic via Reciprocal Rank Fusion.
+
+This is a composite indexer: it does not own storage. It delegates to the
+shared semantic and syntactic indexer instances provided by the engine,
+so a single source uploaded via 'hybrid' is visible to standalone
+'semantic' and 'syntactic' too (and source listing/deletion stay consistent).
+"""
 from __future__ import annotations
 
-from typing import Iterable
+from typing import ClassVar, Iterable
 
 from connectors.base import Document
 
@@ -12,12 +18,7 @@ from .syntactic import SyntacticIndexer
 
 
 def _rrf(result_lists: list[list[dict]], k: int = 60) -> list[dict]:
-    """Reciprocal Rank Fusion. Each input list is presumed sorted best-first.
-
-    The fused score is sum_over_lists( 1 / (k + rank_in_list) ).
-    Identity is (source, first 200 chars of text) so chunks shared across
-    indexers collapse.
-    """
+    """Reciprocal Rank Fusion across result lists."""
     scores: dict[str, float] = {}
     canonical: dict[str, dict] = {}
     for results in result_lists:
@@ -26,30 +27,35 @@ def _rrf(result_lists: list[list[dict]], k: int = 60) -> list[dict]:
             scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
             canonical.setdefault(key, result)
     sorted_keys = sorted(scores, key=lambda x: -scores[x])
-    return [
-        {**canonical[key], "score": scores[key]}
-        for key in sorted_keys
-    ]
+    return [{**canonical[key], "score": scores[key]} for key in sorted_keys]
 
 
 @indexers.register("hybrid")
 class HybridIndexer(Indexer):
     name = "Hybrid (semantic + BM25, RRF)"
     description = (
-        "Indexes into BOTH semantic and syntactic; at query time, fuses "
+        "Indexes into BOTH semantic and syntactic; at query time fuses "
         "results via Reciprocal Rank Fusion. Best for mixed corpora."
     )
+    is_composite: ClassVar[bool] = True
+    deps: ClassVar[list[str]] = ["semantic", "syntactic"]
 
-    def __init__(self, ctx: IndexerContext) -> None:
-        super().__init__(ctx)
-        self._semantic = SemanticIndexer(ctx)
-        self._syntactic = SyntacticIndexer(ctx)
+    def __init__(self, ctx: IndexerContext, deps=None) -> None:
+        super().__init__(ctx, deps)
+        # Reuse injected instances when present (the engine wires this up).
+        # Fall back to local construction so the class still works standalone.
+        self._semantic: SemanticIndexer = (
+            self._deps.get("semantic") if self._deps else None
+        ) or SemanticIndexer(ctx)
+        self._syntactic: SyntacticIndexer = (
+            self._deps.get("syntactic") if self._deps else None
+        ) or SyntacticIndexer(ctx)
 
     def index(self, docs: Iterable[Document], chunk_size: int, overlap: int) -> int:
         doc_list = list(docs)
         n = self._semantic.index(iter(doc_list), chunk_size, overlap)
         self._syntactic.index(iter(doc_list), chunk_size, overlap)
-        return n  # same N from both — chunking is identical
+        return n
 
     def retrieve(self, query: str, top_k: int = 5) -> list[dict]:
         wider = max(top_k * 4, 20)
@@ -60,3 +66,12 @@ class HybridIndexer(Indexer):
     def reset(self) -> None:
         self._semantic.reset()
         self._syntactic.reset()
+
+    def list_sources(self) -> list[dict]:
+        # Both sub-indexers see the same content under hybrid; defer to semantic.
+        return self._semantic.list_sources()
+
+    def delete_source(self, source: str) -> int:
+        n = self._semantic.delete_source(source)
+        self._syntactic.delete_source(source)
+        return n

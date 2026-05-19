@@ -16,8 +16,8 @@ class SemanticIndexer(Indexer):
     name = "Semantic (vector search)"
     description = "Best for paraphrased questions and concept-level retrieval."
 
-    def __init__(self, ctx: IndexerContext) -> None:
-        super().__init__(ctx)
+    def __init__(self, ctx: IndexerContext, deps=None) -> None:
+        super().__init__(ctx, deps)
         self._collection_name = f"{ctx.collection_base}_semantic"
         self._collection = self._get_or_create()
 
@@ -62,7 +62,7 @@ class SemanticIndexer(Indexer):
                 "text": doc,
                 "source": meta.get("source", "?"),
                 "page": meta.get("page") if (meta.get("page") or -1) > 0 else None,
-                "score": float(1.0 - dist),  # cosine distance → similarity
+                "score": float(1.0 - dist),
             }
             for doc, meta, dist in zip(
                 results["documents"][0],
@@ -72,9 +72,24 @@ class SemanticIndexer(Indexer):
         ]
 
     def reset(self) -> None:
-        # Idempotent: deleting a non-existent collection should not raise.
         try:
             self.ctx.chroma_client.delete_collection(name=self._collection_name)
         except Exception:
             pass
         self._collection = self._get_or_create()
+
+    def list_sources(self) -> list[dict]:
+        results = self._collection.get(include=["metadatas"])
+        counts: dict[str, int] = {}
+        for meta in results.get("metadatas") or []:
+            src = meta.get("source", "?")
+            counts[src] = counts.get(src, 0) + 1
+        return [{"source": s, "chunks": c} for s, c in sorted(counts.items())]
+
+    def delete_source(self, source: str) -> int:
+        results = self._collection.get(where={"source": source}, include=[])
+        ids = results.get("ids") or []
+        if not ids:
+            return 0
+        self._collection.delete(ids=ids)
+        return len(ids)

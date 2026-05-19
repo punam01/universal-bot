@@ -1,4 +1,4 @@
-"""Phase 2.5 UI — adds reranker dropdown + multi-turn chat memory."""
+"""Streamlit UI — plugin pickers + source management + multi-turn chat."""
 from __future__ import annotations
 
 import streamlit as st
@@ -45,7 +45,11 @@ def _default_index(options: list[tuple[str, str]], desired: str) -> int:
     return keys.index(desired) if desired in keys else 0
 
 
-# ---------- Sidebar: configuration + ingest ----------
+def _short(name: str, limit: int = 42) -> str:
+    return name if len(name) <= limit else name[: limit - 1] + "…"
+
+
+# ---------- Sidebar: configuration + ingest + sources ----------
 with st.sidebar:
     st.header("Configuration")
 
@@ -139,15 +143,46 @@ with st.sidebar:
             f"file under app/connectors/ to extend."
         )
 
+    # ---------- Indexed sources ----------
+    st.divider()
+    all_sources = engine.list_all_sources()
+    with st.expander(
+        f"Indexed sources ({len(all_sources)})",
+        expanded=False,
+    ):
+        if not all_sources:
+            st.caption("Nothing indexed yet.")
+        else:
+            for entry in all_sources:
+                src_name = entry["source"]
+                indexers_label = ", ".join(entry["indexers"])
+                total = entry["total"]
+                cols = st.columns([5, 1])
+                with cols[0]:
+                    st.caption(
+                        f"**{_short(src_name)}**  \n"
+                        f"{total} chunks · {indexers_label}"
+                    )
+                with cols[1]:
+                    if st.button(
+                        "Remove",
+                        key=f"del::{src_name}",
+                        use_container_width=True,
+                    ):
+                        n = engine.delete_source(src_name)
+                        st.toast(f"Removed {n} chunks from '{src_name}'")
+                        st.rerun()
+
     st.divider()
     if st.button("Reset all indexes", use_container_width=True):
         engine.reset_all()
         st.session_state.pop("messages", None)
         st.success("All indexes cleared")
+        st.rerun()
 
-    if st.button("Clear chat", use_container_width=True):
+    if st.button("Clear chat only", use_container_width=True):
         st.session_state.pop("messages", None)
-        st.success("Chat cleared")
+        st.toast("Chat cleared")
 
 
 # ---------- Main: chat ----------
@@ -174,10 +209,7 @@ if prompt := st.chat_input("Ask a question..."):
             st.error(f"Retrieval failed: {exc}")
             sources = []
 
-        # History excludes the user message we just appended; chat_stream
-        # appends it back as the final user turn alongside the context.
         history = st.session_state.messages[:-1]
-
         placeholder = st.empty()
         full = ""
         try:
