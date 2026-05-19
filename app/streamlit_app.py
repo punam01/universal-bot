@@ -1,4 +1,4 @@
-"""Streamlit UI — plugin pickers + source management + multi-turn chat."""
+"""Streamlit UI — plugin pickers + source management + corpus advisor + multi-turn chat."""
 from __future__ import annotations
 
 import streamlit as st
@@ -11,7 +11,7 @@ st.set_page_config(page_title="universal-bot", layout="wide")
 st.title("universal-bot")
 st.caption(
     "Pluggable connectors, indexers, rewriters, rerankers, and LLM providers. "
-    "Multi-turn chat with cited sources."
+    "Multi-turn chat with cited sources. Corpus advisor recommends settings."
 )
 
 
@@ -42,14 +42,23 @@ def _render_sources(sources: list[dict]) -> None:
 
 def _default_index(options: list[tuple[str, str]], desired: str) -> int:
     keys = [k for k, _ in options]
-    return keys.index(desired) if desired in keys else 0
+    if desired in keys:
+        return keys.index(desired)
+    return 0
 
 
 def _short(name: str, limit: int = 42) -> str:
     return name if len(name) <= limit else name[: limit - 1] + "…"
 
 
-# ---------- Sidebar: configuration + ingest + sources ----------
+# ----- helpers to support "Apply recommendation" -----
+def _initial_for(setting_key: str, fallback: str) -> str:
+    """Read a session_state override (set by Apply) or fall back to the global default."""
+    override = st.session_state.get(setting_key)
+    return override if override else fallback
+
+
+# ---------- Sidebar: configuration + ingest + sources + advisor ----------
 with st.sidebar:
     st.header("Configuration")
 
@@ -63,7 +72,7 @@ with st.sidebar:
     provider_key = st.selectbox(
         "LLM provider",
         options=[k for k, _ in provider_options],
-        index=_default_index(provider_options, settings.default_provider),
+        index=_default_index(provider_options, _initial_for("ub_provider", settings.default_provider)),
         format_func=lambda k: dict(provider_options)[k],
     )
 
@@ -71,7 +80,7 @@ with st.sidebar:
     indexer_key = st.selectbox(
         "Indexer (retrieval strategy)",
         options=[k for k, _ in indexer_options],
-        index=_default_index(indexer_options, settings.default_indexer),
+        index=_default_index(indexer_options, _initial_for("ub_indexer", settings.default_indexer)),
         format_func=lambda k: dict(indexer_options)[k],
         help=(
             "`semantic` = vector similarity, `syntactic` = BM25 keyword, "
@@ -84,13 +93,12 @@ with st.sidebar:
     rewriter_key = st.selectbox(
         "Query rewriter (optional)",
         options=[k for k, _ in rewriter_choices],
-        index=_default_index(rewriter_choices, settings.default_rewriter),
+        index=_default_index(rewriter_choices, _initial_for("ub_rewriter", settings.default_rewriter)),
         format_func=lambda k: dict(rewriter_choices)[k],
         help=(
             "Transforms the query before retrieval. "
             "`hyde` generates a fake answer to embed; "
-            "`multi_query` paraphrases the question 3 ways. "
-            "Adds one LLM call per question."
+            "`multi_query` paraphrases the question 3 ways."
         ),
     )
 
@@ -99,11 +107,11 @@ with st.sidebar:
     reranker_key = st.selectbox(
         "Reranker (optional)",
         options=[k for k, _ in reranker_choices],
-        index=_default_index(reranker_choices, settings.default_reranker),
+        index=_default_index(reranker_choices, _initial_for("ub_reranker", settings.default_reranker)),
         format_func=lambda k: dict(reranker_choices)[k],
         help=(
             "Reorders the top retrieval results with a small CPU model. "
-            "Big quality lift for negligible cost. First use downloads ~4 MB."
+            "First use downloads ~4 MB."
         ),
     )
 
@@ -188,10 +196,58 @@ with st.sidebar:
                         st.toast(f"Removed {n} chunks from '{src_name}'")
                         st.rerun()
 
+    # ---------- Corpus advisor ----------
+    st.divider()
+    with st.expander("Corpus advisor", expanded=False):
+        st.caption(
+            "Samples your indexed content and asks the LLM to recommend a "
+            "retrieval pipeline. Costs one LLM call."
+        )
+        user_goals = st.text_area(
+            "What kinds of questions will users ask?",
+            placeholder=(
+                "e.g. 'Look up API error codes and rate limits' or "
+                "'Summarize and explain key concepts'"
+            ),
+            key="advisor_goals",
+            height=80,
+        )
+        if st.button("Recommend settings", use_container_width=True):
+            with st.spinner("Sampling + asking the LLM…"):
+                result = engine.recommend_settings(user_goals, provider_key)
+            st.session_state["advisor_result"] = result
+
+        result = st.session_state.get("advisor_result")
+        if result:
+            if "error" in result:
+                st.warning(result["error"])
+                if "raw" in result:
+                    with st.expander("Raw LLM output"):
+                        st.code(result["raw"])
+            else:
+                rec = result["recommendation"]
+                st.markdown(
+                    f"**Indexer:** `{rec['indexer']}`  \n"
+                    f"**Rewriter:** `{rec['rewriter']}`  \n"
+                    f"**Reranker:** `{rec['reranker']}`  \n"
+                    f"**Chunk size / overlap:** `{rec['chunk_size']}` / `{rec['chunk_overlap']}`"
+                )
+                st.caption(f"_{rec['rationale']}_")
+                if st.button(
+                    "Apply (dropdowns only — does not re-index)",
+                    use_container_width=True,
+                ):
+                    st.session_state["ub_indexer"] = rec["indexer"]
+                    st.session_state["ub_rewriter"] = rec["rewriter"]
+                    st.session_state["ub_reranker"] = rec["reranker"]
+                    st.toast("Applied. Re-index sources to use the new chunk sizes.")
+                    st.rerun()
+
     st.divider()
     if st.button("Reset all indexes", use_container_width=True):
         engine.reset_all()
         st.session_state.pop("messages", None)
+        st.session_state.pop("advisor_result", None)
         st.success("All indexes cleared")
         st.rerun()
 

@@ -29,7 +29,6 @@ _SYSTEM_PROMPT = (
 
 
 def _merge_dedupe(batches: list[list[dict]], limit: int) -> list[dict]:
-    """Merge multiple result lists; dedupe by (source, first 200 chars), keep max score."""
     seen: dict[tuple[str, str], dict] = {}
     for batch in batches:
         for r in batch:
@@ -113,6 +112,10 @@ class RAGEngine:
             self._rewriter_cache[key] = query_rewriters.get(key)()
         return self._rewriter_cache[key]
 
+    # Public accessor used by the advisor module.
+    def get_provider(self, key: str) -> LLMProvider:
+        return self._provider(key)
+
     # ---------- pipeline ----------
 
     def ingest(
@@ -136,12 +139,10 @@ class RAGEngine:
         rewriter_key: str = "none",
         provider_key: str | None = None,
     ) -> list[dict]:
-        # 1. Decide what to actually query for.
         if rewriter_key == "none":
             queries = [query]
         else:
             if not provider_key:
-                # Without an LLM we can't rewrite; fall back to the raw query.
                 queries = [query]
             else:
                 try:
@@ -153,18 +154,15 @@ class RAGEngine:
                 if not queries:
                     queries = [query]
 
-        # 2. Retrieve from the indexer for each query. Wider pool if reranking.
         per_query_k = top_k * 4 if reranker_key != "none" else top_k
         indexer = self._indexer(indexer_key)
         batches = [indexer.retrieve(q, per_query_k) for q in queries]
 
-        # 3. Merge if we issued multiple queries.
         if len(batches) == 1:
             candidates = batches[0]
         else:
             candidates = _merge_dedupe(batches, per_query_k)
 
-        # 4. Rerank using the ORIGINAL query (not the rewrites).
         if reranker_key != "none" and candidates:
             candidates = self._reranker(reranker_key).rerank(query, candidates, top_k)
         elif len(candidates) > top_k:
@@ -240,3 +238,19 @@ class RAGEngine:
     def reset_all(self) -> None:
         for key in indexers.keys():
             self._indexer(key).reset()
+
+    # ---------- corpus advisor ----------
+
+    def sample_chunks(self, n: int = 8) -> list[str]:
+        """Sample n chunks from the semantic store (populated by any non-syntactic path)."""
+        try:
+            semantic = self._indexer("semantic")
+            results = semantic._collection.get(limit=n, include=["documents"])
+            return results.get("documents") or []
+        except Exception:
+            return []
+
+    def recommend_settings(self, user_goals: str, provider_key: str) -> dict:
+        # Import lazily so advisor.py doesn't have to live above rag.py.
+        from advisor import recommend
+        return recommend(self, user_goals, provider_key)
