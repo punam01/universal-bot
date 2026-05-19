@@ -1,4 +1,4 @@
-"""Streamlit UI — plugin pickers + source management + corpus advisor + multi-turn chat."""
+"""Streamlit UI — projects + plugin pickers + source management + advisor + chat."""
 from __future__ import annotations
 
 import streamlit as st
@@ -10,8 +10,8 @@ from rag import RAGEngine
 st.set_page_config(page_title="universal-bot", layout="wide")
 st.title("universal-bot")
 st.caption(
-    "Pluggable connectors, indexers, rewriters, rerankers, and LLM providers. "
-    "Multi-turn chat with cited sources. Corpus advisor recommends settings."
+    "Multi-project plug-and-play RAG. Switch projects to keep knowledge bases "
+    "isolated. Pluggable connectors, indexers, rewriters, rerankers, providers."
 )
 
 
@@ -23,6 +23,16 @@ def get_engine() -> RAGEngine:
 
 
 engine = get_engine()
+
+# ---------- Apply pending project switch from previous rerun ----------
+pending_project = st.session_state.pop("_pending_project", None)
+if pending_project is not None:
+    try:
+        engine.set_project(pending_project)
+        st.session_state.pop("messages", None)
+        st.session_state.pop("advisor_result", None)
+    except ValueError as exc:
+        st.error(str(exc))
 
 
 def _render_sources(sources: list[dict]) -> None:
@@ -51,15 +61,69 @@ def _short(name: str, limit: int = 42) -> str:
     return name if len(name) <= limit else name[: limit - 1] + "…"
 
 
-# ----- helpers to support "Apply recommendation" -----
 def _initial_for(setting_key: str, fallback: str) -> str:
-    """Read a session_state override (set by Apply) or fall back to the global default."""
     override = st.session_state.get(setting_key)
     return override if override else fallback
 
 
-# ---------- Sidebar: configuration + ingest + sources + advisor ----------
+# ---------- Sidebar ----------
 with st.sidebar:
+    # ----- Project selector (sits above everything) -----
+    st.header("Project")
+    projects = engine.list_projects()
+    current = engine.current_project
+    project_choice = st.selectbox(
+        "Active project",
+        options=projects,
+        index=projects.index(current) if current in projects else 0,
+        key="ub_project_select",
+    )
+    if project_choice != current:
+        # Defer the switch to the next rerun so the cached engine doesn't
+        # service this turn with the wrong project.
+        st.session_state["_pending_project"] = project_choice
+        st.rerun()
+
+    with st.expander("Manage projects", expanded=False):
+        new_name = st.text_input(
+            "New project name",
+            placeholder="e.g. work-docs, recipes",
+            key="ub_new_project_name",
+        )
+        if st.button("Create project", use_container_width=True):
+            try:
+                created = engine.create_project(new_name)
+                st.session_state["_pending_project"] = created
+                st.success(f"Created '{created}'. Switching…")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+
+        if current != "default":
+            st.divider()
+            st.caption(f"Currently on **{current}**.")
+            confirm = st.checkbox(
+                f"I understand this permanently deletes all data in '{current}'.",
+                key="ub_confirm_delete",
+            )
+            if st.button(
+                f"Delete project '{current}'",
+                use_container_width=True,
+                disabled=not confirm,
+            ):
+                try:
+                    engine.delete_project(current)
+                    st.session_state["_pending_project"] = "default"
+                    st.success(f"Deleted '{current}'. Back on 'default'.")
+                    st.rerun()
+                except ValueError as exc:
+                    st.error(str(exc))
+        else:
+            st.caption("(switch to a non-default project to enable delete)")
+
+    st.divider()
+
+    # ----- Configuration -----
     st.header("Configuration")
 
     provider_options = engine.available_providers()
@@ -98,7 +162,7 @@ with st.sidebar:
         help=(
             "Transforms the query before retrieval. "
             "`hyde` generates a fake answer to embed; "
-            "`multi_query` paraphrases the question 3 ways."
+            "`multi_query` paraphrases 3 ways."
         ),
     )
 
@@ -116,7 +180,7 @@ with st.sidebar:
     )
 
     st.divider()
-    st.subheader("Add knowledge")
+    st.subheader(f"Add knowledge to '{current}'")
 
     connector_options = engine.available_connectors()
     connector_key = st.selectbox(
@@ -170,11 +234,11 @@ with st.sidebar:
     st.divider()
     all_sources = engine.list_all_sources()
     with st.expander(
-        f"Indexed sources ({len(all_sources)})",
+        f"Indexed sources in '{current}' ({len(all_sources)})",
         expanded=False,
     ):
         if not all_sources:
-            st.caption("Nothing indexed yet.")
+            st.caption("Nothing indexed in this project yet.")
         else:
             for entry in all_sources:
                 src_name = entry["source"]
@@ -189,7 +253,7 @@ with st.sidebar:
                 with cols[1]:
                     if st.button(
                         "Remove",
-                        key=f"del::{src_name}",
+                        key=f"del::{current}::{src_name}",
                         use_container_width=True,
                     ):
                         n = engine.delete_source(src_name)
@@ -200,7 +264,7 @@ with st.sidebar:
     st.divider()
     with st.expander("Corpus advisor", expanded=False):
         st.caption(
-            "Samples your indexed content and asks the LLM to recommend a "
+            "Samples the current project and asks the LLM to recommend a "
             "retrieval pipeline. Costs one LLM call."
         )
         user_goals = st.text_area(
@@ -244,11 +308,11 @@ with st.sidebar:
                     st.rerun()
 
     st.divider()
-    if st.button("Reset all indexes", use_container_width=True):
+    if st.button(f"Reset all indexes in '{current}'", use_container_width=True):
         engine.reset_all()
         st.session_state.pop("messages", None)
         st.session_state.pop("advisor_result", None)
-        st.success("All indexes cleared")
+        st.success(f"All indexes in '{current}' cleared")
         st.rerun()
 
     if st.button("Clear chat only", use_container_width=True):
@@ -266,7 +330,7 @@ for msg in st.session_state.messages:
         if msg.get("sources"):
             _render_sources(msg["sources"])
 
-if prompt := st.chat_input("Ask a question..."):
+if prompt := st.chat_input(f"Ask a question about '{current}'..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)

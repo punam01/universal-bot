@@ -1,6 +1,18 @@
-"""RAG orchestrator — connectors + query rewriters + indexers + rerankers + providers."""
+"""RAG orchestrator with multi-project isolation.
+
+A "project" is a named, isolated knowledge base — its own Chroma collections
+and its own BM25 pickle file. The current project is held on the engine and
+flows through `_indexer()` so every retrieval / ingest / source-management
+call is scoped to that project.
+
+The 'default' project deliberately keeps the legacy storage paths so
+existing data from before this change is preserved.
+"""
 from __future__ import annotations
 
+import json
+import re
+import shutil
 from pathlib import Path
 from typing import Iterator
 
@@ -27,6 +39,9 @@ _SYSTEM_PROMPT = (
     "continuity only — they do not contain authoritative facts."
 )
 
+_DEFAULT_PROJECT = "default"
+_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
+
 
 def _merge_dedupe(batches: list[list[dict]], limit: int) -> list[dict]:
     seen: dict[tuple[str, str], dict] = {}
@@ -47,17 +62,130 @@ class RAGEngine:
             settings=ChromaSettings(anonymized_telemetry=False),
         )
         self._embedder = TextEmbedding(model_name=settings.embed_model)
-        self._indexer_ctx = IndexerContext(
-            chroma_client=self._chroma,
-            embedder=self._embedder,
-            collection_base=settings.collection,
-            storage_dir=Path(settings.chroma_dir),
-        )
+        self._current_project: str = _DEFAULT_PROJECT
+
         self._provider_cache: dict[str, LLMProvider] = {}
-        self._indexer_cache: dict[str, Indexer] = {}
+        # Indexer + connector caches keyed by (plugin_key, project) so switching
+        # projects doesn't reuse the wrong storage.
+        self._indexer_cache: dict[tuple[str, str], Indexer] = {}
         self._connector_cache: dict[str, Connector] = {}
         self._reranker_cache: dict[str, Reranker] = {}
         self._rewriter_cache: dict[str, QueryRewriter] = {}
+
+        # Ensure the projects index file lists 'default' at minimum.
+        self._ensure_project_in_index(_DEFAULT_PROJECT)
+
+    # ---------- project management ----------
+
+    @property
+    def current_project(self) -> str:
+        return self._current_project
+
+    def _projects_index_path(self) -> Path:
+        return Path(settings.chroma_dir) / "projects.json"
+
+    def list_projects(self) -> list[str]:
+        path = self._projects_index_path()
+        if not path.exists():
+            return [_DEFAULT_PROJECT]
+        try:
+            with path.open() as f:
+                data = json.load(f)
+            projects = sorted({_DEFAULT_PROJECT, *data})
+            return projects
+        except Exception:
+            return [_DEFAULT_PROJECT]
+
+    def _ensure_project_in_index(self, name: str) -> None:
+        existing = set(self.list_projects())
+        if name in existing:
+            return
+        existing.add(name)
+        path = self._projects_index_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w") as f:
+            json.dump(sorted(existing), f)
+
+    def _validate_project_name(self, name: str) -> str:
+        name = name.strip()
+        if not _PROJECT_NAME_RE.match(name):
+            raise ValueError(
+                "Project name must start with a letter or digit and contain "
+                "only letters, digits, '.', '_', or '-' (max 32 chars)."
+            )
+        return name
+
+    def create_project(self, name: str) -> str:
+        name = self._validate_project_name(name)
+        self._ensure_project_in_index(name)
+        return name
+
+    def set_project(self, name: str) -> None:
+        if name not in self.list_projects():
+            raise ValueError(f"Unknown project: {name!r}")
+        self._current_project = name
+
+    def delete_project(self, name: str) -> None:
+        if name == _DEFAULT_PROJECT:
+            raise ValueError("The 'default' project cannot be deleted.")
+        if name not in self.list_projects():
+            raise ValueError(f"Unknown project: {name!r}")
+
+        # Drop chroma collections owned by this project.
+        try:
+            for col in self._chroma.list_collections():
+                if col.name.startswith(f"{settings.collection}__{name}__"):
+                    try:
+                        self._chroma.delete_collection(col.name)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # Wipe its on-disk storage (bm25 pickle, etc.).
+        project_dir = Path(settings.chroma_dir) / name
+        if project_dir.exists():
+            shutil.rmtree(project_dir, ignore_errors=True)
+
+        # Update the projects index.
+        path = self._projects_index_path()
+        if path.exists():
+            try:
+                with path.open() as f:
+                    data = json.load(f)
+                remaining = sorted({p for p in data if p != name})
+                with path.open("w") as f:
+                    json.dump(remaining, f)
+            except Exception:
+                pass
+
+        # Drop cached indexer instances for this project.
+        self._indexer_cache = {
+            key: val
+            for key, val in self._indexer_cache.items()
+            if key[1] != name
+        }
+        if self._current_project == name:
+            self._current_project = _DEFAULT_PROJECT
+
+    # ---------- per-project IndexerContext ----------
+
+    def _make_ctx(self, project: str) -> IndexerContext:
+        if project == _DEFAULT_PROJECT:
+            # Preserve the original storage layout so data from before
+            # project isolation keeps working.
+            return IndexerContext(
+                chroma_client=self._chroma,
+                embedder=self._embedder,
+                collection_base=settings.collection,
+                storage_dir=Path(settings.chroma_dir),
+            )
+        return IndexerContext(
+            chroma_client=self._chroma,
+            embedder=self._embedder,
+            collection_base=f"{settings.collection}__{project}",
+            storage_dir=Path(settings.chroma_dir) / project,
+        )
 
     # ---------- registry surfaces (consumed by the UI) ----------
 
@@ -87,15 +215,18 @@ class RAGEngine:
         return self._provider_cache[key]
 
     def _indexer(self, key: str) -> Indexer:
-        if key not in self._indexer_cache:
+        project = self._current_project
+        cache_key = (key, project)
+        if cache_key not in self._indexer_cache:
             cls = indexers.get(key)
+            ctx = self._make_ctx(project)
             dep_keys = getattr(cls, "deps", []) or []
             if dep_keys:
                 resolved = {dep: self._indexer(dep) for dep in dep_keys}
-                self._indexer_cache[key] = cls(self._indexer_ctx, deps=resolved)
+                self._indexer_cache[cache_key] = cls(ctx, deps=resolved)
             else:
-                self._indexer_cache[key] = cls(self._indexer_ctx)
-        return self._indexer_cache[key]
+                self._indexer_cache[cache_key] = cls(ctx)
+        return self._indexer_cache[cache_key]
 
     def _connector(self, key: str) -> Connector:
         if key not in self._connector_cache:
@@ -112,7 +243,6 @@ class RAGEngine:
             self._rewriter_cache[key] = query_rewriters.get(key)()
         return self._rewriter_cache[key]
 
-    # Public accessor used by the advisor module.
     def get_provider(self, key: str) -> LLMProvider:
         return self._provider(key)
 
@@ -206,7 +336,7 @@ class RAGEngine:
 
         yield from self._provider(provider_key).stream(messages)
 
-    # ---------- source management ----------
+    # ---------- source management (scoped to current project) ----------
 
     def list_all_sources(self) -> list[dict]:
         merged: dict[str, dict] = {}
@@ -242,7 +372,6 @@ class RAGEngine:
     # ---------- corpus advisor ----------
 
     def sample_chunks(self, n: int = 8) -> list[str]:
-        """Sample n chunks from the semantic store (populated by any non-syntactic path)."""
         try:
             semantic = self._indexer("semantic")
             results = semantic._collection.get(limit=n, include=["documents"])
@@ -251,6 +380,5 @@ class RAGEngine:
             return []
 
     def recommend_settings(self, user_goals: str, provider_key: str) -> dict:
-        # Import lazily so advisor.py doesn't have to live above rag.py.
         from advisor import recommend
         return recommend(self, user_goals, provider_key)
