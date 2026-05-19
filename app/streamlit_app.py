@@ -10,7 +10,7 @@ from rag import RAGEngine
 st.set_page_config(page_title="universal-bot", layout="wide")
 st.title("universal-bot")
 st.caption(
-    "Pluggable connectors, indexers, rerankers, and LLM providers. "
+    "Pluggable connectors, indexers, rewriters, rerankers, and LLM providers. "
     "Multi-turn chat with cited sources."
 )
 
@@ -76,6 +76,21 @@ with st.sidebar:
         help=(
             "`semantic` = vector similarity, `syntactic` = BM25 keyword, "
             "`hybrid` = both fused via RRF."
+        ),
+    )
+
+    rewriter_options = engine.available_rewriters()
+    rewriter_choices = [("none", "None")] + rewriter_options
+    rewriter_key = st.selectbox(
+        "Query rewriter (optional)",
+        options=[k for k, _ in rewriter_choices],
+        index=_default_index(rewriter_choices, settings.default_rewriter),
+        format_func=lambda k: dict(rewriter_choices)[k],
+        help=(
+            "Transforms the query before retrieval. "
+            "`hyde` generates a fake answer to embed; "
+            "`multi_query` paraphrases the question 3 ways. "
+            "Adds one LLM call per question."
         ),
     )
 
@@ -201,13 +216,20 @@ if prompt := st.chat_input("Ask a question..."):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        try:
-            sources = engine.retrieve(
-                indexer_key, prompt, reranker_key=reranker_key
-            )
-        except Exception as exc:
-            st.error(f"Retrieval failed: {exc}")
-            sources = []
+        with st.spinner(
+            "Rewriting query…" if rewriter_key != "none" else "Searching…"
+        ):
+            try:
+                sources = engine.retrieve(
+                    indexer_key,
+                    prompt,
+                    reranker_key=reranker_key,
+                    rewriter_key=rewriter_key,
+                    provider_key=provider_key,
+                )
+            except Exception as exc:
+                st.error(f"Retrieval failed: {exc}")
+                sources = []
 
         history = st.session_state.messages[:-1]
         placeholder = st.empty()

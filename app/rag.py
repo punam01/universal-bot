@@ -1,4 +1,4 @@
-"""RAG orchestrator — connectors + indexers + rerankers + providers."""
+"""RAG orchestrator — connectors + query rewriters + indexers + rerankers + providers."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,6 +13,8 @@ from connectors import connectors, Connector
 from indexers import indexers, Indexer, IndexerContext
 from providers import providers
 from providers.base import LLMProvider
+from query_rewriters import query_rewriters
+from query_rewriters.base import QueryRewriter
 from rerankers import rerankers
 from rerankers.base import Reranker
 
@@ -24,6 +26,18 @@ _SYSTEM_PROMPT = (
     "context, say so honestly. Prior chat turns are for conversational "
     "continuity only — they do not contain authoritative facts."
 )
+
+
+def _merge_dedupe(batches: list[list[dict]], limit: int) -> list[dict]:
+    """Merge multiple result lists; dedupe by (source, first 200 chars), keep max score."""
+    seen: dict[tuple[str, str], dict] = {}
+    for batch in batches:
+        for r in batch:
+            key = (r.get("source", "?"), r["text"][:200])
+            existing = seen.get(key)
+            if existing is None or r["score"] > existing["score"]:
+                seen[key] = r
+    return sorted(seen.values(), key=lambda x: -x["score"])[:limit]
 
 
 class RAGEngine:
@@ -44,6 +58,7 @@ class RAGEngine:
         self._indexer_cache: dict[str, Indexer] = {}
         self._connector_cache: dict[str, Connector] = {}
         self._reranker_cache: dict[str, Reranker] = {}
+        self._rewriter_cache: dict[str, QueryRewriter] = {}
 
     # ---------- registry surfaces (consumed by the UI) ----------
 
@@ -58,6 +73,9 @@ class RAGEngine:
 
     def available_rerankers(self) -> list[tuple[str, str]]:
         return [(key, rerankers.get(key).name) for key in rerankers.keys()]
+
+    def available_rewriters(self) -> list[tuple[str, str]]:
+        return [(key, query_rewriters.get(key).name) for key in query_rewriters.keys()]
 
     def connector_kind(self, key: str) -> str:
         return connectors.get(key).input_kind
@@ -90,6 +108,11 @@ class RAGEngine:
             self._reranker_cache[key] = rerankers.get(key)()
         return self._reranker_cache[key]
 
+    def _rewriter(self, key: str) -> QueryRewriter:
+        if key not in self._rewriter_cache:
+            self._rewriter_cache[key] = query_rewriters.get(key)()
+        return self._rewriter_cache[key]
+
     # ---------- pipeline ----------
 
     def ingest(
@@ -110,13 +133,44 @@ class RAGEngine:
         query: str,
         top_k: int = 5,
         reranker_key: str = "none",
+        rewriter_key: str = "none",
+        provider_key: str | None = None,
     ) -> list[dict]:
-        if reranker_key == "none":
-            return self._indexer(indexer_key).retrieve(query, top_k)
-        initial = self._indexer(indexer_key).retrieve(query, top_k * 4)
-        if not initial:
-            return []
-        return self._reranker(reranker_key).rerank(query, initial, top_k)
+        # 1. Decide what to actually query for.
+        if rewriter_key == "none":
+            queries = [query]
+        else:
+            if not provider_key:
+                # Without an LLM we can't rewrite; fall back to the raw query.
+                queries = [query]
+            else:
+                try:
+                    queries = self._rewriter(rewriter_key).rewrite(
+                        query, self._provider(provider_key)
+                    )
+                except Exception:
+                    queries = [query]
+                if not queries:
+                    queries = [query]
+
+        # 2. Retrieve from the indexer for each query. Wider pool if reranking.
+        per_query_k = top_k * 4 if reranker_key != "none" else top_k
+        indexer = self._indexer(indexer_key)
+        batches = [indexer.retrieve(q, per_query_k) for q in queries]
+
+        # 3. Merge if we issued multiple queries.
+        if len(batches) == 1:
+            candidates = batches[0]
+        else:
+            candidates = _merge_dedupe(batches, per_query_k)
+
+        # 4. Rerank using the ORIGINAL query (not the rewrites).
+        if reranker_key != "none" and candidates:
+            candidates = self._reranker(reranker_key).rerank(query, candidates, top_k)
+        elif len(candidates) > top_k:
+            candidates = candidates[:top_k]
+
+        return candidates
 
     def chat_stream(
         self,
@@ -157,11 +211,6 @@ class RAGEngine:
     # ---------- source management ----------
 
     def list_all_sources(self) -> list[dict]:
-        """Aggregate sources across all non-composite indexers.
-
-        Returns: [{source, indexers: list[str], chunks: dict[indexer_key, int],
-                   total: int}], sorted by source name.
-        """
         merged: dict[str, dict] = {}
         for key in indexers.keys():
             cls = indexers.get(key)
@@ -180,7 +229,6 @@ class RAGEngine:
         return sorted(merged.values(), key=lambda x: x["source"].lower())
 
     def delete_source(self, source: str) -> int:
-        """Delete a source from every non-composite indexer that holds it."""
         total = 0
         for key in indexers.keys():
             cls = indexers.get(key)
