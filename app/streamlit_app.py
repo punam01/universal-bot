@@ -1,4 +1,4 @@
-"""Streamlit UI — projects + plugin pickers + source management + advisor + chat."""
+"""Streamlit UI — projects + plugin pickers + sources + advisor + eval + chat."""
 from __future__ import annotations
 
 import streamlit as st
@@ -24,13 +24,14 @@ def get_engine() -> RAGEngine:
 
 engine = get_engine()
 
-# ---------- Apply pending project switch from previous rerun ----------
+# Apply pending project switch from previous rerun
 pending_project = st.session_state.pop("_pending_project", None)
 if pending_project is not None:
     try:
         engine.set_project(pending_project)
         st.session_state.pop("messages", None)
         st.session_state.pop("advisor_result", None)
+        st.session_state.pop("eval_result", None)
     except ValueError as exc:
         st.error(str(exc))
 
@@ -68,7 +69,7 @@ def _initial_for(setting_key: str, fallback: str) -> str:
 
 # ---------- Sidebar ----------
 with st.sidebar:
-    # ----- Project selector (sits above everything) -----
+    # ----- Project selector -----
     st.header("Project")
     projects = engine.list_projects()
     current = engine.current_project
@@ -79,8 +80,6 @@ with st.sidebar:
         key="ub_project_select",
     )
     if project_choice != current:
-        # Defer the switch to the next rerun so the cached engine doesn't
-        # service this turn with the wrong project.
         st.session_state["_pending_project"] = project_choice
         st.rerun()
 
@@ -307,11 +306,109 @@ with st.sidebar:
                     st.toast("Applied. Re-index sources to use the new chunk sizes.")
                     st.rerun()
 
+    # ---------- Evaluation ----------
+    st.divider()
+    with st.expander("Evaluation", expanded=False):
+        from eval_harness import (
+            all_common_configs,
+            delete_question,
+            load_golden,
+            run_eval,
+        )
+
+        golden = load_golden(current)
+        st.caption(
+            f"{len(golden)} question(s) saved in the eval set for '{current}'. "
+            "Add more from chat using the 'Save this Q to eval set' button."
+        )
+
+        if golden:
+            with st.expander(f"View / remove eval questions ({len(golden)})"):
+                for q in golden:
+                    cols = st.columns([5, 1])
+                    with cols[0]:
+                        st.caption(f"**Q:** {_short(q.question, 80)}")
+                        if q.expected_sources:
+                            st.caption(
+                                "_Expected: "
+                                + ", ".join(_short(s, 30) for s in q.expected_sources)
+                                + "_"
+                            )
+                    with cols[1]:
+                        if st.button(
+                            "Remove",
+                            key=f"eval_del::{current}::{q.question}",
+                            use_container_width=True,
+                        ):
+                            delete_question(current, q.question)
+                            st.rerun()
+
+        mode = st.radio(
+            "What to test",
+            ["Current settings only", "All combinations"],
+            horizontal=True,
+        )
+
+        if st.button(
+            "Run eval",
+            use_container_width=True,
+            disabled=not golden,
+        ):
+            indexer_keys = [k for k, _ in engine.available_indexers()]
+            rewriter_keys = [k for k, _ in engine.available_rewriters()]
+            reranker_keys = [k for k, _ in engine.available_rerankers()]
+
+            if mode == "Current settings only":
+                configs = [
+                    {
+                        "indexer": indexer_key,
+                        "rewriter": rewriter_key,
+                        "reranker": reranker_key,
+                    }
+                ]
+            else:
+                configs = all_common_configs(
+                    indexer_keys, rewriter_keys, reranker_keys
+                )
+
+            with st.spinner(
+                f"Running {len(configs)} configs × {len(golden)} questions…"
+            ):
+                st.session_state["eval_result"] = run_eval(
+                    engine, current, configs, provider_key
+                )
+
+        eval_result = st.session_state.get("eval_result")
+        if eval_result:
+            if "error" in eval_result:
+                st.warning(eval_result["error"])
+            else:
+                st.markdown(
+                    f"**{eval_result['n_configs']}** configs × "
+                    f"**{eval_result['n_questions']}** questions"
+                )
+                rows = eval_result["summary"]
+                # Render as a markdown table (no pandas dep needed)
+                lines = [
+                    "| Config (indexer / rewriter / reranker) | Avg source recall | N |",
+                    "|---|---:|---:|",
+                ]
+                for row in rows:
+                    lines.append(
+                        f"| `{row['config']}` | {row['avg_source_recall']:.3f} | {row['n_questions']} |"
+                    )
+                st.markdown("\n".join(lines))
+                st.caption(
+                    "Source recall = fraction of expected sources that "
+                    "showed up in retrieval. Higher is better."
+                )
+
     st.divider()
     if st.button(f"Reset all indexes in '{current}'", use_container_width=True):
         engine.reset_all()
         st.session_state.pop("messages", None)
         st.session_state.pop("advisor_result", None)
+        st.session_state.pop("eval_result", None)
         st.success(f"All indexes in '{current}' cleared")
         st.rerun()
 
@@ -369,3 +466,28 @@ if prompt := st.chat_input(f"Ask a question about '{current}'..."):
     st.session_state.messages.append(
         {"role": "assistant", "content": full, "sources": sources}
     )
+
+# ---------- Save the last Q to the eval set ----------
+last = st.session_state.messages[-1] if st.session_state.messages else None
+if (
+    last
+    and last.get("role") == "assistant"
+    and last.get("sources")
+    and len(st.session_state.messages) >= 2
+):
+    user_q = st.session_state.messages[-2].get("content", "")
+    expected = sorted({s["source"] for s in last["sources"]})
+    if st.button(
+        "Save this Q to eval set",
+        key=f"save_eval::{hash((current, user_q))}",
+    ):
+        from eval_harness import GoldenQuestion, save_question
+
+        save_question(
+            current,
+            GoldenQuestion(question=user_q, expected_sources=expected),
+        )
+        st.toast(
+            f"Saved to eval set ({len(expected)} expected source"
+            f"{'s' if len(expected) != 1 else ''})."
+        )
