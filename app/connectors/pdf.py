@@ -1,4 +1,4 @@
-"""PDF connector — pypdfium2 per-page text extraction."""
+"""PDF connector — pypdfium2 per-page text extraction (text-based PDFs)."""
 from __future__ import annotations
 
 import io
@@ -12,9 +12,10 @@ from .base import Connector, Document
 
 @connectors.register("pdf")
 class PDFConnector(Connector):
-    name = "PDF file"
-    description = "Upload a PDF; yields one Document per page."
+    name = "PDF (text-based)"
+    description = "Upload a text-based PDF; yields one Document per page."
     input_kind = "file"
+    accepted_extensions = ["pdf"]
 
     def fetch(self, payload: bytes, source_name: str) -> Iterator[Document]:
         pdf = pdfium.PdfDocument(io.BytesIO(payload))

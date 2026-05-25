@@ -193,7 +193,11 @@ class RAGEngine:
         return [(key, providers.get(key).name) for key in providers.available()]
 
     def available_connectors(self) -> list[tuple[str, str]]:
-        return [(key, connectors.get(key).name) for key in connectors.keys()]
+        return [(key, connectors.get(key).name) for key in connectors.available()]
+
+    def connector_extensions(self, key: str) -> list[str]:
+        """File extensions the named connector accepts (for the file uploader)."""
+        return list(connectors.get(key).accepted_extensions or [])
 
     def available_indexers(self) -> list[tuple[str, str]]:
         return [(key, indexers.get(key).name) for key in indexers.keys()]

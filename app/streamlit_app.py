@@ -228,17 +228,19 @@ with st.sidebar:
     connector_name = dict(connector_options)[connector_key]
 
     if connector_kind == "file":
-        pdf = st.file_uploader(f"Upload file ({connector_name})", type=["pdf"])
-        if pdf is not None and st.button(
-            f"Index {pdf.name}", use_container_width=True
+        extensions = engine.connector_extensions(connector_key) or ["txt"]
+        uploaded = st.file_uploader(
+            f"Upload file ({connector_name})",
+            type=extensions,
+        )
+        if uploaded is not None and st.button(
+            f"Index {uploaded.name}", use_container_width=True
         ):
             progress = st.empty()
 
             def _file_progress(count: int, source: str) -> None:
-                noun = "page" if connector_key == "pdf" else "document"
                 progress.caption(
-                    f"Processed {count} {noun}"
-                    f"{'s' if count != 1 else ''}…"
+                    f"Processed {count} item{'s' if count != 1 else ''}…"
                 )
 
             with st.spinner("Ingesting…"):
@@ -246,8 +248,8 @@ with st.sidebar:
                     n = engine.ingest(
                         connector_key,
                         indexer_key,
-                        pdf.getvalue(),
-                        pdf.name,
+                        uploaded.getvalue(),
+                        uploaded.name,
                         on_progress=_file_progress,
                     )
                 except Exception as exc:

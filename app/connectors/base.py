@@ -14,9 +14,14 @@ class Document:
 
 
 class Connector(ABC):
-    name: ClassVar[str]                  # display name (UI)
+    name: ClassVar[str]
     description: ClassVar[str] = ""
-    input_kind: ClassVar[str]            # "file" | "url" | "text"
+    input_kind: ClassVar[str]                       # "file" | "url" | "text"
+    accepted_extensions: ClassVar[list[str]] = []   # extensions for input_kind="file"
+
+    @classmethod
+    def is_available(cls) -> bool:
+        return True
 
     @abstractmethod
     def fetch(self, payload, source_name: str) -> Iterator[Document]:
