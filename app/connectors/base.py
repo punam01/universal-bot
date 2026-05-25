@@ -17,7 +17,8 @@ class Connector(ABC):
     name: ClassVar[str]
     description: ClassVar[str] = ""
     input_kind: ClassVar[str]                       # "file" | "url" | "text"
-    accepted_extensions: ClassVar[list[str]] = []   # extensions for input_kind="file"
+    accepted_extensions: ClassVar[list[str]] = []   # for input_kind="file"
+    placeholder: ClassVar[str] = ""                 # for input_kind in {"url","text"}
 
     @classmethod
     def is_available(cls) -> bool:

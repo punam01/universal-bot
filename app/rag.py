@@ -199,6 +199,10 @@ class RAGEngine:
         """File extensions the named connector accepts (for the file uploader)."""
         return list(connectors.get(key).accepted_extensions or [])
 
+    def connector_placeholder(self, key: str) -> str:
+        """Placeholder text the connector wants in its text/url input."""
+        return getattr(connectors.get(key), "placeholder", "") or ""
+
     def available_indexers(self) -> list[tuple[str, str]]:
         return [(key, indexers.get(key).name) for key in indexers.keys()]
 

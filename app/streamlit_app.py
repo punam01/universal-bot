@@ -258,29 +258,33 @@ with st.sidebar:
                     progress.empty()
                     st.success(f"Indexed {n} chunks into '{indexer_key}'")
 
-    elif connector_kind == "url":
-        url = st.text_input("URL", placeholder="https://...")
-        if url and st.button(
+    elif connector_kind in ("url", "text"):
+        placeholder = engine.connector_placeholder(connector_key) or (
+            "https://..." if connector_kind == "url" else ""
+        )
+        label = "URL" if connector_kind == "url" else connector_name
+        user_input = st.text_input(label, placeholder=placeholder)
+        if user_input and st.button(
             f"Run {connector_name}", use_container_width=True
         ):
             progress = st.empty()
 
-            def _url_progress(count: int, source: str) -> None:
+            def _input_progress(count: int, source: str) -> None:
                 progress.caption(
-                    f"Fetched {count} page{'s' if count != 1 else ''} so far · "
+                    f"Fetched {count} item{'s' if count != 1 else ''} so far · "
                     f"latest: {_short(source, 60)}"
                 )
 
             with st.spinner(
-                f"{connector_name} running… (crawls may take a few minutes)"
+                f"{connector_name} running… (may take a few minutes)"
             ):
                 try:
                     n = engine.ingest(
                         connector_key,
                         indexer_key,
-                        url,
-                        url,
-                        on_progress=_url_progress,
+                        user_input,
+                        user_input,
+                        on_progress=_input_progress,
                     )
                 except Exception as exc:
                     st.error(f"Ingest failed — {_friendly_error(exc)}")
