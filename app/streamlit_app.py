@@ -36,6 +36,8 @@ if pending_project is not None:
         st.error(str(exc))
 
 
+# ---------- helpers ----------
+
 def _render_sources(sources: list[dict]) -> None:
     with st.expander(f"Sources ({len(sources)})"):
         for i, s in enumerate(sources, 1):
@@ -67,6 +69,39 @@ def _initial_for(setting_key: str, fallback: str) -> str:
     return override if override else fallback
 
 
+def _friendly_error(exc: Exception) -> str:
+    """Render an exception as one tidy line (class + message), no stack noise."""
+    msg = str(exc).strip()
+    if not msg:
+        return type(exc).__name__
+    if len(msg) > 240:
+        msg = msg[:237] + "…"
+    return f"{type(exc).__name__}: {msg}"
+
+
+def _render_save_eval_button(msg_idx: int, msg: dict, project: str) -> None:
+    """Show a 'Save this Q to eval set' button below an assistant message with sources."""
+    if msg.get("role") != "assistant" or not msg.get("sources"):
+        return
+    msgs = st.session_state.messages
+    if msg_idx == 0 or msgs[msg_idx - 1].get("role") != "user":
+        return
+    user_q = msgs[msg_idx - 1].get("content", "")
+    expected = sorted({s["source"] for s in msg["sources"]})
+    key = f"save_eval::{project}::{msg_idx}::{hash(user_q)}"
+    if st.button("Save this Q to eval set", key=key):
+        from eval_harness import GoldenQuestion, save_question
+
+        save_question(
+            project,
+            GoldenQuestion(question=user_q, expected_sources=expected),
+        )
+        st.toast(
+            f"Saved to eval set ({len(expected)} expected source"
+            f"{'s' if len(expected) != 1 else ''})."
+        )
+
+
 # ---------- Sidebar ----------
 with st.sidebar:
     # ----- Project selector -----
@@ -96,7 +131,7 @@ with st.sidebar:
                 st.success(f"Created '{created}'. Switching…")
                 st.rerun()
             except ValueError as exc:
-                st.error(str(exc))
+                st.error(_friendly_error(exc))
 
         if current != "default":
             st.divider()
@@ -116,7 +151,7 @@ with st.sidebar:
                     st.success(f"Deleted '{current}'. Back on 'default'.")
                     st.rerun()
                 except ValueError as exc:
-                    st.error(str(exc))
+                    st.error(_friendly_error(exc))
         else:
             st.caption("(switch to a non-default project to enable delete)")
 
@@ -197,28 +232,58 @@ with st.sidebar:
         if pdf is not None and st.button(
             f"Index {pdf.name}", use_container_width=True
         ):
-            with st.spinner("Ingesting..."):
+            progress = st.empty()
+
+            def _file_progress(count: int, source: str) -> None:
+                noun = "page" if connector_key == "pdf" else "document"
+                progress.caption(
+                    f"Processed {count} {noun}"
+                    f"{'s' if count != 1 else ''}…"
+                )
+
+            with st.spinner("Ingesting…"):
                 try:
                     n = engine.ingest(
-                        connector_key, indexer_key, pdf.getvalue(), pdf.name
+                        connector_key,
+                        indexer_key,
+                        pdf.getvalue(),
+                        pdf.name,
+                        on_progress=_file_progress,
                     )
                 except Exception as exc:
-                    st.error(f"Ingest failed: {exc}")
+                    st.error(f"Ingest failed — {_friendly_error(exc)}")
                 else:
+                    progress.empty()
                     st.success(f"Indexed {n} chunks into '{indexer_key}'")
+
     elif connector_kind == "url":
         url = st.text_input("URL", placeholder="https://...")
         if url and st.button(
             f"Run {connector_name}", use_container_width=True
         ):
+            progress = st.empty()
+
+            def _url_progress(count: int, source: str) -> None:
+                progress.caption(
+                    f"Fetched {count} page{'s' if count != 1 else ''} so far · "
+                    f"latest: {_short(source, 60)}"
+                )
+
             with st.spinner(
-                f"{connector_name} running... (crawls may take a few minutes)"
+                f"{connector_name} running… (crawls may take a few minutes)"
             ):
                 try:
-                    n = engine.ingest(connector_key, indexer_key, url, url)
+                    n = engine.ingest(
+                        connector_key,
+                        indexer_key,
+                        url,
+                        url,
+                        on_progress=_url_progress,
+                    )
                 except Exception as exc:
-                    st.error(f"Ingest failed: {exc}")
+                    st.error(f"Ingest failed — {_friendly_error(exc)}")
                 else:
+                    progress.empty()
                     if n == 0:
                         st.warning("No content extracted.")
                     else:
@@ -277,7 +342,10 @@ with st.sidebar:
         )
         if st.button("Recommend settings", use_container_width=True):
             with st.spinner("Sampling + asking the LLM…"):
-                result = engine.recommend_settings(user_goals, provider_key)
+                try:
+                    result = engine.recommend_settings(user_goals, provider_key)
+                except Exception as exc:
+                    result = {"error": _friendly_error(exc)}
             st.session_state["advisor_result"] = result
 
         result = st.session_state.get("advisor_result")
@@ -319,7 +387,8 @@ with st.sidebar:
         golden = load_golden(current)
         st.caption(
             f"{len(golden)} question(s) saved in the eval set for '{current}'. "
-            "Add more from chat using the 'Save this Q to eval set' button."
+            "Add more from the 'Save this Q to eval set' button under any "
+            "assistant answer in the chat."
         )
 
         if golden:
@@ -374,9 +443,12 @@ with st.sidebar:
             with st.spinner(
                 f"Running {len(configs)} configs × {len(golden)} questions…"
             ):
-                st.session_state["eval_result"] = run_eval(
-                    engine, current, configs, provider_key
-                )
+                try:
+                    st.session_state["eval_result"] = run_eval(
+                        engine, current, configs, provider_key
+                    )
+                except Exception as exc:
+                    st.session_state["eval_result"] = {"error": _friendly_error(exc)}
 
         eval_result = st.session_state.get("eval_result")
         if eval_result:
@@ -388,7 +460,6 @@ with st.sidebar:
                     f"**{eval_result['n_questions']}** questions"
                 )
                 rows = eval_result["summary"]
-                # Render as a markdown table (no pandas dep needed)
                 lines = [
                     "| Config (indexer / rewriter / reranker) | Avg source recall | N |",
                     "|---|---:|---:|",
@@ -421,11 +492,12 @@ with st.sidebar:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-for msg in st.session_state.messages:
+for idx, msg in enumerate(st.session_state.messages):
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if msg.get("sources"):
             _render_sources(msg["sources"])
+            _render_save_eval_button(idx, msg, current)
 
 if prompt := st.chat_input(f"Ask a question about '{current}'..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -445,7 +517,7 @@ if prompt := st.chat_input(f"Ask a question about '{current}'..."):
                     provider_key=provider_key,
                 )
             except Exception as exc:
-                st.error(f"Retrieval failed: {exc}")
+                st.error(f"Retrieval failed — {_friendly_error(exc)}")
                 sources = []
 
         history = st.session_state.messages[:-1]
@@ -458,36 +530,17 @@ if prompt := st.chat_input(f"Ask a question about '{current}'..."):
                 full += token
                 placeholder.markdown(full + "▌")
         except Exception as exc:
-            full = f"_LLM error: {exc}_"
+            full = f"_LLM error — {_friendly_error(exc)}_"
         placeholder.markdown(full)
         if sources:
             _render_sources(sources)
+            # Inline save button so it sits right below the answer's sources.
+            _render_save_eval_button(
+                len(st.session_state.messages),  # this message hasn't been appended yet
+                {"role": "assistant", "content": full, "sources": sources},
+                current,
+            )
 
     st.session_state.messages.append(
         {"role": "assistant", "content": full, "sources": sources}
     )
-
-# ---------- Save the last Q to the eval set ----------
-last = st.session_state.messages[-1] if st.session_state.messages else None
-if (
-    last
-    and last.get("role") == "assistant"
-    and last.get("sources")
-    and len(st.session_state.messages) >= 2
-):
-    user_q = st.session_state.messages[-2].get("content", "")
-    expected = sorted({s["source"] for s in last["sources"]})
-    if st.button(
-        "Save this Q to eval set",
-        key=f"save_eval::{hash((current, user_q))}",
-    ):
-        from eval_harness import GoldenQuestion, save_question
-
-        save_question(
-            current,
-            GoldenQuestion(question=user_q, expected_sources=expected),
-        )
-        st.toast(
-            f"Saved to eval set ({len(expected)} expected source"
-            f"{'s' if len(expected) != 1 else ''})."
-        )

@@ -254,8 +254,32 @@ class RAGEngine:
         indexer_key: str,
         payload,
         source_name: str,
+        on_progress=None,
     ) -> int:
-        docs = self._connector(connector_key).fetch(payload, source_name)
+        """Ingest a payload via the chosen connector + indexer.
+
+        `on_progress`, if provided, is called as `on_progress(count, source)`
+        for every Document yielded by the connector. Useful for crawls that
+        emit one Document per page — lets the UI show "fetched N pages so far".
+        """
+        raw_docs = self._connector(connector_key).fetch(payload, source_name)
+
+        if on_progress is None:
+            docs = raw_docs
+        else:
+            def _with_progress():
+                count = 0
+                for doc in raw_docs:
+                    count += 1
+                    try:
+                        on_progress(count, doc.source)
+                    except Exception:
+                        # never break ingest because the UI hook misbehaved
+                        pass
+                    yield doc
+
+            docs = _with_progress()
+
         return self._indexer(indexer_key).index(
             docs, settings.chunk_size, settings.chunk_overlap
         )
