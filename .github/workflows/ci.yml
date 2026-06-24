@@ -10,7 +10,7 @@ jobs:
     name: license check (no AGPL / GPL / SSPL)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: verify LICENSE is Apache-2.0
         run: grep -q "Apache License" LICENSE
       - name: scan repo for banned license strings
